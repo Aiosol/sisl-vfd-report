@@ -14,9 +14,7 @@ SISL VFD Stock Report Generator
   with auto‑incremented version tag.
 """
 
-import os
-import re
-import glob
+import os, re, glob
 from datetime import datetime
 import pandas as pd
 from fpdf import FPDF
@@ -40,13 +38,11 @@ def money(x):
 paths = glob.glob(os.path.join(DATA_DIR, "*.csv"))
 inv_csv = price127_csv = listprice_csv = None
 
-# Prefer explicit filename for list‑price
 for p in paths:
     if os.path.basename(p).lower() == "vfd_price_sisl_final.csv":
         listprice_csv = p
         break
 
-# Identify inventory and 1.27 files by header
 for p in paths:
     hdr = pd.read_csv(p, nrows=0).columns.str.strip().tolist()
     if {"Qty owned", "Total cost"}.issubset(hdr):
@@ -54,7 +50,6 @@ for p in paths:
     elif "1.27" in hdr:
         price127_csv = p
 
-# Fallback: the remaining file is list‑price
 if not listprice_csv:
     leftovers = [p for p in paths if p not in (inv_csv, price127_csv)]
     if leftovers:
@@ -120,9 +115,9 @@ inv["Model"] = (
 )
 inv = inv[(inv["Qty owned"] > 0) & ~inv["Model"].isin({"FR-S520SE-0.2K-19", "PEC"})]
 
-inv["Qty"]       = inv["Qty owned"].astype(int)
-inv["TotalCost"] = inv["Total cost"].str.replace(",", "").astype(float)
-inv["COGS"]      = inv["TotalCost"] / inv["Qty"]
+inv["Qty"]        = inv["Qty owned"].astype(int)
+inv["TotalCost"]  = inv["Total cost"].str.replace(",", "").astype(float)
+inv["COGS"]       = inv["TotalCost"] / inv["Qty"]
 inv["COGS_x1.75"] = inv["COGS"] * 1.75
 
 p127 = pd.read_csv(price127_csv)
@@ -130,9 +125,9 @@ p127_map = dict(zip(
     p127.iloc[:,0].str.strip(),
     p127.iloc[:,1].astype(str).str.replace(",", "").astype(float)
 ))
-inv["1.27"]     = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
-inv["Series"]   = inv["Model"].apply(series_tag)
-inv["ListPrice"]= inv["Model"].apply(lambda m: list_price(m, lp_map))
+inv["1.27"]      = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
+inv["Series"]    = inv["Model"].apply(series_tag)
+inv["ListPrice"] = inv["Model"].apply(lambda m: list_price(m, lp_map))
 
 inv["Disc20"] = inv["ListPrice"] * 0.80
 inv["Disc25"] = inv["ListPrice"] * 0.75
@@ -190,7 +185,7 @@ for _, r in inv.iterrows():
     pdf.cell(cols[4][1], ROW_H, money(r["Disc20"]), 1, 0, 'R', shade)
     pdf.cell(cols[5][1], ROW_H, money(r["Disc25"]), 1, 0, 'R', shade)
     pdf.cell(cols[6][1], ROW_H, money(r["Disc30"]), 1, 0, 'R', shade)
-    pdf.cell(cols[7][1], ROW_H, (f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else ""), 1, 0, 'R', shade)
+    pdf.cell(cols[7][1], ROW_H, f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else "", 1, 0, 'R', shade)
     pdf.cell(cols[8][1], ROW_H, money(r["COGS"]), 1, 0, 'R', shade)
     pdf.cell(cols[9][1], ROW_H, money(r["COGS_x1.75"]), 1, 0, 'R', shade)
     pdf.cell(cols[10][1],ROW_H, money(r["1.27"]), 1, 0, 'R', shade)
@@ -202,11 +197,20 @@ pdf.cell(cols[0][1] + cols[1][1], ROW_H, "Total", 1, 0, 'R')
 pdf.cell(cols[2][1], ROW_H, str(int(inv["Qty"].sum())), 1, 0, 'C')
 pdf.cell(sum(w for _, w, _ in cols[3:]), ROW_H, "", 1, 0)
 
+# Safe version‑increment logic
 os.makedirs(OUT_DIR, exist_ok=True)
-tag       = datetime.now().strftime("%y%m%d")
-existing  = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
-vers      = [int(re.search(r"_V\.(\d{2})\\.pdf", f).group(1)) for f in existing] if existing else []
-outfile   = f"SISL_VFD_PL_{tag}_V.{(max(vers) + 1 if vers else 5):02d}.pdf"
+tag = datetime.now().strftime("%y%m%d")
+existing = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
+pattern = re.compile(r"_V\.(\d{2})\.pdf$")
+
+vers = []
+for f in existing:
+    m = pattern.search(os.path.basename(f))
+    if m:
+        vers.append(int(m.group(1)))
+
+next_ver = max(vers) + 1 if vers else 5
+outfile  = f"SISL_VFD_PL_{tag}_V.{next_ver:02d}.pdf"
 pdf.output(os.path.join(OUT_DIR, outfile))
 
 print("Generated:", outfile)
