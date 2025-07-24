@@ -204,3 +204,4 @@ ver = int(re.search(r"_V\.(\d+)\.pdf$", existing[-1]).group(1)) + 1 if existing 
 outfile = PDF_DIR / f"SISL_VFD_PL_{date_tag}_V.{ver:02d}.pdf"
 pdf.output(outfile)
 print("✓ Report saved to:", outfile)
+python build_vfd_report.py
