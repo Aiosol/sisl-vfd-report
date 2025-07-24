@@ -1,0 +1,3 @@
+pandas>=2.2
+fpdf2==2.7.8      # PDF generation (mm units, UTF‑8)
+python-dateutil   # robust date handling for version stamping

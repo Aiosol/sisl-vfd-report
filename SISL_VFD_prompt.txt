@@ -1,0 +1,45 @@
+You’re my coding assistant for the “SISL VFD Stock Report” generator.
+
+🗂️ Repo structure (local path):
+  ├─ data/
+  │   ├─ VFD_PRICE_LAST.csv            # inventory  (Qty owned, Total cost)
+  │   ├─ VFD_PRICE_JULY_2025.csv       # 1.27 price list (“1.27” column)
+  │   └─ VFD_Price_SISL_Final.csv      # master list‑price map
+  ├─ build_vfd_report.py  ← current script
+  └─ pdf_reports/          ← PDF output folder
+
+🎯 Report requirements
+1. Exclude rows with Qty = 0, and models **“FR‑S520SE‑0.2K‑19”** or any model containing **“PEC”**.
+2. Compute for each model:  
+   • COGS, COGS×1.75 • List Price • 1.27 price • 20 / 25 / 30 % discounts • GP %.
+3. Sort by capacity (0.4 K → 400 K) **then** by series in the exact order **D, E, F, A, HEL**.
+4. Output an A4‑portrait PDF (0.6″ margins) into `pdf_reports/`  
+   – filename pattern: `SISL_VFD_PL_<YYMMDD>_V.<nn>.pdf`  
+   – auto‑increment the version *nn* for each run.
+5. Header: “VFD STOCK LIST”, today’s date, company “Smart Industrial Solution Ltd.”  
+6. Table columns (mm widths):  
+   SL 8, Model 34, Qty 8, List Price 17, 20 % Disc 17, 25 % Disc 17, 30 % Disc 17, GP % 11, COGS 17, COGS×1.75 18, 1.27 17
+
+📐 Series & capacity helpers (in code):
+def series_tag(model):
+    if re.search(r"FR-HEL", model, re.I): return "H"
+    m = re.match(r"FR-([A-Z])", model)
+    return m.group(1) if m else ""
+
+order_map = {"D":0, "E":1, "F":2, "A":3, "H":4}
+
+def capacity_val(model):
+    m = re.search(r"-(?:H)?([\d.]+)K", model)
+    return float(m.group(1)) if m else 0.0
+
+🔧 List‑price lookup logic:
+1 Exact match            → use it  
+2 Special D/E⇆A fallback  → 720 / 740 families  
+3 Generic cross‑series fallback (A⇆E⇆F⇆D) for same family/capacity  
+
+📄 Known quirks
+– Inventory “Name” vs “Model” column; script normalises.  
+– `FR‑D720S‑025‑NA` renames to `FR‑D720S‑0.4K`.  
+– Some list prices truly absent; fallback now fills most.
+
+✅ `build_vfd_report.py` (v0.5) already implements everything.
