@@ -6,7 +6,7 @@ SISL VFD Stock Report Generator
   - Inventory     (contains “Qty owned” & “Total cost”)
   - 1.27 price     (contains “1.27” column)
   - List‑Price map (the remaining CSV)
-• Excludes zero‑qty, FR‑S520SE‑0.2K-19, and “PEC”
+• Excludes zero‑qty, FR‑S520SE‑0.2K‑19, and “PEC”
 • Calculates COGS, COGS×1.75, List Price, 1.27 prices,
   discount tiers (20/25/30%), and GP%
 • Sorts by capacity then series (D→E→F→A→HEL)
@@ -28,10 +28,6 @@ BODY_FONT   = 7
 
 # ─── SAFE MONEY FORMATTER ────────────────────────────────
 def money(x):
-    """
-    Try to format x as a float with commas and two decimals;
-    return empty string on failure or if x is missing.
-    """
     try:
         return f"{float(x):,.2f}"
     except:
@@ -41,7 +37,6 @@ def money(x):
 paths = glob.glob(os.path.join(DATA_DIR, "*.csv"))
 inv_csv = price127_csv = listprice_csv = None
 
-# Identify inventory & 1.27 files by header inspection
 for p in paths:
     hdrs = pd.read_csv(p, nrows=0).columns.str.strip().tolist()
     if "Qty owned" in hdrs and "Total cost" in hdrs:
@@ -49,10 +44,9 @@ for p in paths:
     elif "1.27" in hdrs:
         price127_csv = p
 
-# The third CSV is the List‑Price master
-candidates = [p for p in paths if p not in (inv_csv, price127_csv)]
-if candidates:
-    listprice_csv = candidates[0]
+remaining = [p for p in paths if p not in (inv_csv, price127_csv)]
+if remaining:
+    listprice_csv = remaining[0]
 
 if not all((inv_csv, price127_csv, listprice_csv)):
     raise FileNotFoundError(f"Expected 3 CSVs in {DATA_DIR}, found: {paths}")
@@ -86,10 +80,8 @@ def list_price(m, lp_map):
     mm = re.search(r"-(?:H)?([\d.]+)K", m)
     if not mm: return None
     cap = mm.group(1) + "K"
-    # D720/E720 fallback → A820/E820
     if any(t in m for t in ("D720","D720S","E720","E820")):
         return lp_map.get(f"FR-A820-{cap}-1") or lp_map.get(f"FR-E820-{cap}-1")
-    # D740/E740 fallback → A840/E840
     if any(t in m for t in ("D740","E740","E840")):
         return lp_map.get(f"FR-A840-{cap}-1") or lp_map.get(f"FR-E840-{cap}-1")
     return None
@@ -105,10 +97,8 @@ def get_capacity(m):
     return float(mm.group(1)) if mm else 0.0
 
 # ─── LOAD & PROCESS ─────────────────────────────────────
-# Master List‑Price map
 lp_map = parse_listprice(listprice_csv)
 
-# Inventory data
 inv = pd.read_csv(inv_csv)
 inv.columns = inv.columns.str.strip()
 inv["Model"] = (
@@ -122,7 +112,6 @@ inv["TotalCost"] = inv["Total cost"].astype(str).str.replace(",", "").astype(flo
 inv["COGS"]      = inv["TotalCost"] / inv["Qty"]
 inv["COGS_x1.75"]= inv["COGS"] * 1.75
 
-# 1.27 price lookup
 p127 = pd.read_csv(price127_csv)
 p127_map = dict(zip(
     p127.iloc[:,0].str.strip(),
@@ -130,18 +119,15 @@ p127_map = dict(zip(
 ))
 inv["1.27"] = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
 
-# Attach List Price & compute discounts + GP%
 inv["Series"]    = inv["Model"].apply(get_series)
-inv["IsHEL"]     = inv["Series"]=="H"
-inv["ListPrice"] = inv["Model"].apply(lambda m: None if m.startswith("HEL") else list_price(m, lp_map))
-inv.loc[inv["IsHEL"], "ListPrice"] = None
+# *** HEL rows now get List Price too ***
+inv["ListPrice"] = inv["Model"].apply(lambda m: list_price(m, lp_map))
 
 inv["Disc20"] = inv["ListPrice"] * 0.80
 inv["Disc25"] = inv["ListPrice"] * 0.75
 inv["Disc30"] = inv["ListPrice"] * 0.70
 inv["GPpct"]  = (inv["ListPrice"] - inv["COGS"]) / inv["COGS"] * 100
 
-# Sort rows
 inv["Capacity"]    = inv["Model"].apply(get_capacity)
 order_map         = {"D":0,"E":1,"F":2,"A":3,"H":4}
 inv["SeriesOrder"] = inv["Series"].map(order_map).fillna(99)
@@ -161,9 +147,10 @@ class StockPDF(FPDF):
         self.cell(0,6,f"Page {self.page_no()}",0,0,'C')
 
 cols = [
-    ("SL",8,'C'),("Model",34,'L'),("Qty",8,'C'),("List Price",17,'R'),
-    ("20% Disc",17,'R'),("25% Disc",17,'R'),("30% Disc",17,'R'),
-    ("GP%",11,'R'),("COGS",17,'R'),("COGS ×1.75",18,'R'),("1.27",17,'R')
+    ("SL",8,'C'), ("Model",34,'L'), ("Qty",8,'C'),
+    ("List Price",17,'R'), ("20% Disc",17,'R'), ("25% Disc",17,'R'),
+    ("30% Disc",17,'R'), ("GP%",11,'R'), ("COGS",17,'R'),
+    ("COGS ×1.75",18,'R'), ("1.27",17,'R')
 ]
 
 pdf = StockPDF('P','mm','A4')
@@ -172,13 +159,11 @@ pdf.set_margins(margin_mm,15,margin_mm)
 pdf.set_auto_page_break(True,15)
 pdf.add_page()
 
-# Header row
 pdf.set_font("Arial","B",HDR_FONT)
 for title,width,align in cols:
     pdf.cell(width,ROW_H,title,1,0,align)
 pdf.ln()
 
-# Body rows
 pdf.set_font("Arial", size=BODY_FONT)
 fill = False
 for _, row in inv.iterrows():
@@ -190,13 +175,11 @@ for _, row in inv.iterrows():
     pdf.ln()
     fill = not fill
 
-# Total row
 pdf.set_font("Arial","B",BODY_FONT)
 pdf.cell(cols[0][1]+cols[1][1],ROW_H,"Total",1,0,'R')
 pdf.cell(cols[2][1],ROW_H,str(inv["Qty"].sum()),1,0,'C')
 pdf.cell(sum(w for _,w,_ in cols[3:]),ROW_H,"",1,0)
 
-# Save with auto‑version
 os.makedirs(OUT_DIR, exist_ok=True)
 tag      = datetime.now().strftime("%y%m%d")
 existing = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
