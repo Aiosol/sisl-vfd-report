@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
 SISL VFD Stock Report Generator v0.5
-
-Generates an A4‑portrait PDF (0.6" margins) listing VFD inventory with costs,
-list prices, discounts, and gross profit margin, sorted by capacity and series.
+– A4 portrait, 0.6″ margins
+– Filters: zero‑Qty, FR‑S520SE‑0.2K‑19, “PEC”
+– Computes COGS, COGS×1.75, ListPrice, 1.27, 20/25/30 % discounts, GP %
+– Sort: Capacity (0.4→400 K) then Series (D,E,F,A,HEL)
 """
 
-import os
-import re
+import os, re, sys
 import pandas as pd
 from fpdf import FPDF
 from datetime import datetime
 
-# --- Configuration ---
+# ──────────────────────────────────────
+# 1 · Paths & constants
+# ──────────────────────────────────────
 DATA_DIR      = 'data'
 PDF_DIR       = 'pdf_reports'
 VERSION       = '0.5'
@@ -20,113 +22,114 @@ INVENTORY_CSV = os.path.join(DATA_DIR, 'VFD_PRICE_LAST.csv')
 PRICE127_CSV  = os.path.join(DATA_DIR, 'VFD_PRICE_JULY_2025.csv')
 MASTER_CSV    = os.path.join(DATA_DIR, 'VFD_Price_SISL_Final.csv')
 
-# --- Load CSVs ---
+# ──────────────────────────────────────
+# 2 · Load CSVs
+# ──────────────────────────────────────
 df_inv    = pd.read_csv(INVENTORY_CSV)
 df_127    = pd.read_csv(PRICE127_CSV)
 df_master = pd.read_csv(MASTER_CSV)
 
-# --- Normalize column names ---
-df_inv.columns    = df_inv.columns.str.strip()
-df_127.columns    = df_127.columns.str.strip()
-df_master.columns = df_master.columns.str.strip()
+# Trim column whitespace
+for df in (df_inv, df_127, df_master):
+    df.columns = df.columns.str.strip()
 
-# --- Identify & rename key columns ---
-# Inventory: Model, Qty owned, Total cost
-df_inv.rename(columns={'Qty owned': 'Qty', 'Total cost': 'TotalCost'}, inplace=True)
+# ──────────────────────────────────────
+# 3 · Rename key columns
+# ──────────────────────────────────────
+df_inv.rename(columns={'Qty owned':'Qty',
+                       'Total cost':'TotalCost'}, inplace=True)
 
-# Price127: first column → Model; column containing "1.27" → Price127
-df_127.rename(columns={df_127.columns[0]: 'Model'}, inplace=True)
+df_127.rename(columns={df_127.columns[0]:'Model'}, inplace=True)
 col_127 = next((c for c in df_127.columns if '1.27' in c), None)
-if col_127 is None:
-    raise ValueError("Could not find '1.27' column in PRICE127_CSV")
-df_127.rename(columns={col_127: 'Price127'}, inplace=True)
+if not col_127:
+    sys.exit("❌ 1.27 column not found in PRICE127_CSV")
+df_127.rename(columns={col_127:'Price127'}, inplace=True)
 
-# Master: first column → Model; column containing "list" (case‑insensitive) → ListPrice
-df_master.rename(columns={df_master.columns[0]: 'Model'}, inplace=True)
-col_list = next((c for c in df_master.columns if 'list' in c.lower()), None)
-if col_list is None:
-    raise ValueError("Could not find list‑price column in MASTER_CSV")
-df_master.rename(columns={col_list: 'ListPrice'}, inplace=True)
+df_master.rename(columns={df_master.columns[0]:'Model'}, inplace=True)
+price_candidates = [
+    c for c in df_master.columns
+    if re.search(r'price', c, re.I) and '1.27' not in c
+]
+if not price_candidates:
+    sys.exit(f"❌ No list‑price column found in {MASTER_CSV}. "
+             f"Columns are: {', '.join(df_master.columns)}")
+df_master.rename(columns={price_candidates[0]:'ListPrice'}, inplace=True)
 
-# --- Merge dataframes ---
-df = (
-    df_inv[['Model', 'Qty', 'TotalCost']]
-    .merge(df_master[['Model', 'ListPrice']], on='Model', how='left')
-    .merge(df_127[['Model', 'Price127']], on='Model', how='left')
-)
+# ──────────────────────────────────────
+# 4 · Merge & filter
+# ──────────────────────────────────────
+df = (df_inv[['Model','Qty','TotalCost']]
+      .merge(df_master[['Model','ListPrice']], how='left')
+      .merge(df_127[['Model','Price127']], how='left'))
 
-# --- Apply filters ---
 df = df[
-    (df['Qty'] > 0) &
-    (df['Model'] != 'FR-S520SE-0.2K-19') &
-    (~df['Model'].str.contains('PEC', na=False))
+    (df.Qty > 0) &
+    (df.Model != 'FR-S520SE-0.2K-19') &
+    (~df.Model.str.contains('PEC', na=False))
 ].copy()
 
-# --- Calculations ---
-df['COGS']     = df['TotalCost'] / df['Qty']
-df['COGS175']  = df['COGS'] * 1.75
-df['Disc20']   = df['ListPrice'] * 0.80
-df['Disc25']   = df['ListPrice'] * 0.75
-df['Disc30']   = df['ListPrice'] * 0.70
-df['GP_pct']   = (df['ListPrice'] - df['COGS']) / df['ListPrice'] * 100
+# ──────────────────────────────────────
+# 5 · Calculations
+# ──────────────────────────────────────
+df['COGS']     = df.TotalCost / df.Qty
+df['COGS175']  = df.COGS * 1.75
+df['Disc20']   = df.ListPrice * 0.80
+df['Disc25']   = df.ListPrice * 0.75
+df['Disc30']   = df.ListPrice * 0.70
+df['GP_pct']   = (df.ListPrice - df.COGS) / df.ListPrice * 100
 
-# --- Extract sort keys: capacity and series ---
-def extract_capacity(model):
-    m = re.search(r'-(\d+\.?\d*)K', model)
-    return float(m.group(1)) if m else 0.0
+# Capacity & series extraction
+df['Capacity'] = df.Model.str.extract(r'-(\d+\.?\d*)K').astype(float)
+df['Series']   = df.Model.str.extract(r'FR-([A-Z]+)\d')
+series_order   = {'D':0,'E':1,'F':2,'A':3,'HEL':4}
+df['SeriesOrder'] = df.Series.map(series_order).fillna(5)
 
-def extract_series(model):
-    m = re.match(r'FR-([A-Z]+)\d', model)
-    return m.group(1) if m else ''
+df.sort_values(['Capacity','SeriesOrder'], inplace=True)
 
-df['Capacity']    = df['Model'].apply(extract_capacity)
-df['Series']      = df['Model'].apply(extract_series)
-order_map = {'D': 0, 'E': 1, 'F': 2, 'A': 3, 'HEL': 4}
-df['SeriesOrder'] = df['Series'].map(order_map).fillna(5)
-
-# --- Sort dataframe ---
-df.sort_values(['Capacity', 'SeriesOrder'], inplace=True)
-
-# --- Prepare PDF output ---
+# ──────────────────────────────────────
+# 6 · PDF
+# ──────────────────────────────────────
 os.makedirs(PDF_DIR, exist_ok=True)
-today_str   = datetime.now().strftime('%Y%m%d')
-output_file = f'SISL_VFD_Stock_Report_v{VERSION}_{today_str}.pdf'
-output_path = os.path.join(PDF_DIR, output_file)
+today = datetime.now().strftime('%Y%m%d')
+out   = os.path.join(PDF_DIR,
+         f'SISL_VFD_Stock_Report_v{VERSION}_{today}.pdf')
 
-pdf = FPDF(orientation='P', unit='in', format='A4')
-pdf.set_margins(0.6, 0.6, 0.6)
-pdf.set_auto_page_break(auto=True, margin=0.6)
+pdf = FPDF('P','in','A4')
+pdf.set_margins(0.6,0.6,0.6)
+pdf.set_auto_page_break(True,0.6)
 pdf.add_page()
 
-# --- Header ---
-pdf.set_font('Arial', 'B', 12)
-pdf.cell(0, 0.3, f'SISL VFD Stock Report v{VERSION} – {datetime.now():%Y-%m-%d}', ln=True, align='C')
+pdf.set_font('Arial','B',12)
+pdf.cell(0,0.3,
+         f'SISL VFD Stock Report v{VERSION} – {datetime.now():%Y-%m-%d}',
+         ln=1,align='C')
 pdf.ln(0.2)
 
-# --- Table header ---
-pdf.set_font('Arial', 'B', 10)
-headers    = ['SL','Model','Qty','COGS','COGS×1.75','ListPrice','1.27','20%','25%','30%','GP%']
-col_widths = [0.4, 1.8, 0.5, 0.7, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6]
-for h, w in zip(headers, col_widths):
-    pdf.cell(w, 0.3, h, border=1, align='C')
+headers    = ['SL','Model','Qty','COGS','COGS×1.75','ListPrice',
+              '1.27','20%','25%','30%','GP%']
+widths     = [0.4,1.8,0.5,0.7,0.8,0.8,0.8,0.8,0.8,0.8,0.6]
+
+pdf.set_font('Arial','B',10)
+for h,w in zip(headers,widths):
+    pdf.cell(w,0.3,h,1,0,'C')
 pdf.ln()
 
-# --- Table rows ---
-pdf.set_font('Arial', '', 9)
-for i, row in enumerate(df.itertuples(index=False), start=1):
-    pdf.cell(col_widths[0], 0.25, str(i), 1, 0, 'C')
-    pdf.cell(col_widths[1], 0.25, row.Model, 1, 0, 'L')
-    pdf.cell(col_widths[2], 0.25, f'{int(row.Qty)}', 1, 0, 'C')
-    pdf.cell(col_widths[3], 0.25, f'{row.COGS:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[4], 0.25, f'{row.COGS175:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[5], 0.25, f'{row.ListPrice:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[6], 0.25, f'{row.Price127 if pd.notna(row.Price127) else 0:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[7], 0.25, f'{row.Disc20:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[8], 0.25, f'{row.Disc25:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[9], 0.25, f'{row.Disc30:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[10],0.25, f'{row.GP_pct:,.2f}%', 1, 0, 'R')
+pdf.set_font('Arial','',9)
+for i,row in enumerate(df.itertuples(index=False),1):
+    pdf.cell(widths[0],0.25,str(i),1,0,'C')
+    pdf.cell(widths[1],0.25,row.Model,1,0,'L')
+    pdf.cell(widths[2],0.25,f'{int(row.Qty)}',1,0,'C')
+    pdf.cell(widths[3],0.25,f'{row.COGS:,.2f}',1,0,'R')
+    pdf.cell(widths[4],0.25,f'{row.COGS175:,.2f}',1,0,'R')
+    pdf.cell(widths[5],0.25,f'{row.ListPrice:,.2f}',1,0,'R')
+    pdf.cell(widths[6],0.25,
+             f'{(row.Price127 if pd.notna(row.Price127) else 0):,.2f}',
+             1,0,'R')
+    pdf.cell(widths[7],0.25,f'{row.Disc20:,.2f}',1,0,'R')
+    pdf.cell(widths[8],0.25,f'{row.Disc25:,.2f}',1,0,'R')
+    pdf.cell(widths[9],0.25,f'{row.Disc30:,.2f}',1,0,'R')
+    pdf.cell(widths[10],0.25,f'{row.GP_pct:,.2f}%',1,0,'R')
     pdf.ln()
 
-# --- Save PDF ---
-pdf.output(output_path)
-print(f"Generated PDF: {output_path}")
+pdf.output(out)
+print("✅ PDF generated:", out)
