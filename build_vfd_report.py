@@ -2,7 +2,7 @@
 """
 SISL VFD Stock Report Generator v0.5
 
-Generates an A4-portrait PDF (0.6" margins) listing VFD inventory with costs,
+Generates an A4‑portrait PDF (0.6" margins) listing VFD inventory with costs,
 list prices, discounts, and gross profit margin, sorted by capacity and series.
 """
 
@@ -30,16 +30,22 @@ df_inv.columns    = df_inv.columns.str.strip()
 df_127.columns    = df_127.columns.str.strip()
 df_master.columns = df_master.columns.str.strip()
 
-# --- Identify and rename key columns ---
+# --- Identify & rename key columns ---
 # Inventory: Model, Qty owned, Total cost
 df_inv.rename(columns={'Qty owned': 'Qty', 'Total cost': 'TotalCost'}, inplace=True)
-# Price127: rename first column to Model, find the '1.27' column
+
+# Price127: first column → Model; column containing "1.27" → Price127
 df_127.rename(columns={df_127.columns[0]: 'Model'}, inplace=True)
-col_127 = next(c for c in df_127.columns if '1.27' in c)
+col_127 = next((c for c in df_127.columns if '1.27' in c), None)
+if col_127 is None:
+    raise ValueError("Could not find '1.27' column in PRICE127_CSV")
 df_127.rename(columns={col_127: 'Price127'}, inplace=True)
-# Master: rename first column to Model, find list-price column
+
+# Master: first column → Model; column containing "list" (case‑insensitive) → ListPrice
 df_master.rename(columns={df_master.columns[0]: 'Model'}, inplace=True)
-col_list = next(c for c in df_master.columns if 'List' in c)
+col_list = next((c for c in df_master.columns if 'list' in c.lower()), None)
+if col_list is None:
+    raise ValueError("Could not find list‑price column in MASTER_CSV")
 df_master.rename(columns={col_list: 'ListPrice'}, inplace=True)
 
 # --- Merge dataframes ---
@@ -50,29 +56,28 @@ df = (
 )
 
 # --- Apply filters ---
-mask = (
-    (df['Qty'] > 0)
-    & (df['Model'] != 'FR-S520SE-0.2K-19')
-    & (~df['Model'].str.contains('PEC', na=False))
-)
-df = df.loc[mask].copy()
+df = df[
+    (df['Qty'] > 0) &
+    (df['Model'] != 'FR-S520SE-0.2K-19') &
+    (~df['Model'].str.contains('PEC', na=False))
+].copy()
 
 # --- Calculations ---
-df['COGS']    = df['TotalCost'] / df['Qty']
-df['COGS175'] = df['COGS'] * 1.75
-df['Disc20']  = df['ListPrice'] * 0.80
-df['Disc25']  = df['ListPrice'] * 0.75
-df['Disc30']  = df['ListPrice'] * 0.70
-df['GP_pct']  = (df['ListPrice'] - df['COGS']) / df['ListPrice'] * 100
+df['COGS']     = df['TotalCost'] / df['Qty']
+df['COGS175']  = df['COGS'] * 1.75
+df['Disc20']   = df['ListPrice'] * 0.80
+df['Disc25']   = df['ListPrice'] * 0.75
+df['Disc30']   = df['ListPrice'] * 0.70
+df['GP_pct']   = (df['ListPrice'] - df['COGS']) / df['ListPrice'] * 100
 
 # --- Extract sort keys: capacity and series ---
-def extract_capacity(m):
-    found = re.search(r'-(\d+\.?\d*)K', m)
-    return float(found.group(1)) if found else 0.0
+def extract_capacity(model):
+    m = re.search(r'-(\d+\.?\d*)K', model)
+    return float(m.group(1)) if m else 0.0
 
-def extract_series(m):
-    found = re.match(r'FR-([A-Z]+)\d', m)
-    return found.group(1) if found else ''
+def extract_series(model):
+    m = re.match(r'FR-([A-Z]+)\d', model)
+    return m.group(1) if m else ''
 
 df['Capacity']    = df['Model'].apply(extract_capacity)
 df['Series']      = df['Model'].apply(extract_series)
@@ -80,7 +85,7 @@ order_map = {'D': 0, 'E': 1, 'F': 2, 'A': 3, 'HEL': 4}
 df['SeriesOrder'] = df['Series'].map(order_map).fillna(5)
 
 # --- Sort dataframe ---
-df.sort_values(['Capacity','SeriesOrder'], inplace=True)
+df.sort_values(['Capacity', 'SeriesOrder'], inplace=True)
 
 # --- Prepare PDF output ---
 os.makedirs(PDF_DIR, exist_ok=True)
@@ -94,20 +99,20 @@ pdf.set_auto_page_break(auto=True, margin=0.6)
 pdf.add_page()
 
 # --- Header ---
-pdf.set_font('Arial','B',12)
+pdf.set_font('Arial', 'B', 12)
 pdf.cell(0, 0.3, f'SISL VFD Stock Report v{VERSION} – {datetime.now():%Y-%m-%d}', ln=True, align='C')
 pdf.ln(0.2)
 
 # --- Table header ---
-pdf.set_font('Arial','B',10)
-headers = ['SL','Model','Qty','COGS','COGS×1.75','ListPrice','1.27','20% Disc','25% Disc','30% Disc','GP%']
+pdf.set_font('Arial', 'B', 10)
+headers    = ['SL','Model','Qty','COGS','COGS×1.75','ListPrice','1.27','20%','25%','30%','GP%']
 col_widths = [0.4, 1.8, 0.5, 0.7, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6]
-for h,w in zip(headers, col_widths):
+for h, w in zip(headers, col_widths):
     pdf.cell(w, 0.3, h, border=1, align='C')
 pdf.ln()
 
 # --- Table rows ---
-pdf.set_font('Arial','',9)
+pdf.set_font('Arial', '', 9)
 for i, row in enumerate(df.itertuples(index=False), start=1):
     pdf.cell(col_widths[0], 0.25, str(i), 1, 0, 'C')
     pdf.cell(col_widths[1], 0.25, row.Model, 1, 0, 'L')
@@ -115,11 +120,11 @@ for i, row in enumerate(df.itertuples(index=False), start=1):
     pdf.cell(col_widths[3], 0.25, f'{row.COGS:,.2f}', 1, 0, 'R')
     pdf.cell(col_widths[4], 0.25, f'{row.COGS175:,.2f}', 1, 0, 'R')
     pdf.cell(col_widths[5], 0.25, f'{row.ListPrice:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[6], 0.25, f'{(row.Price127 if pd.notna(row.Price127) else 0):,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[6], 0.25, f'{row.Price127 if pd.notna(row.Price127) else 0:,.2f}', 1, 0, 'R')
     pdf.cell(col_widths[7], 0.25, f'{row.Disc20:,.2f}', 1, 0, 'R')
     pdf.cell(col_widths[8], 0.25, f'{row.Disc25:,.2f}', 1, 0, 'R')
     pdf.cell(col_widths[9], 0.25, f'{row.Disc30:,.2f}', 1, 0, 'R')
-    pdf.cell(col_widths[10], 0.25, f'{row.GP_pct:,.2f}%', 1, 0, 'R')
+    pdf.cell(col_widths[10],0.25, f'{row.GP_pct:,.2f}%', 1, 0, 'R')
     pdf.ln()
 
 # --- Save PDF ---
