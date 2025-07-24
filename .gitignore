@@ -1,0 +1,10 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Data files & output
+data/
+pdf_reports/
+
+# Environment files
+.env
