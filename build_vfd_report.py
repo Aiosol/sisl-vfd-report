@@ -1,34 +1,16 @@
 #!/usr/bin/env python3
 """
-SISL VFD STOCK LIST generator  • v0.11  (2025‑07‑25)
+SISL VFD STOCK LIST generator  • v0.12  (2025‑07‑25)
 
-Key points (unchanged)
-----------------------
-• Reads three CSVs in ./data and skips Qty = 0, FR‑S520SE‑0.2K‑19, and “PEC”.
-• Calculates COGS, COGS×1.75, List Price, 1.27 Price, 20 / 25 / 30 % discounts, GP %.
-• Sorts by capacity (0.4 K → 400 K) then D → E → F → A → HEL.
-• Outputs A4‑portrait PDF (0.6″ margins) named
-    SISL_VFD_PL_<YYMMDD>_V.<nn>.pdf (auto‑increment per day).
-
-What’s new in v0.11
--------------------
-✓ Alias list for the inventory’s model column now includes **"name"** so headers
-  `['Name', 'Qty owned', 'Total cost']` are recognised without edits.
-✓ If any essential column is still missing the script prints the detected
-  header list and raises a helpful error.
-
-Repo layout
------------
-project‑root/
-├─ data/
-│   ├─ VFD_PRICE_LAST.csv         # inventory (Name, Qty owned, Total cost)
-│   ├─ VFD_PRICE_JULY_2025.csv    # 1.27 price list
-│   └─ VFD_Price_SISL_Final.csv   # master list price map
-└─ pdf_reports/                   # output PDFs
+▲ NEW IN THIS VERSION
+  • Sanitises inventory numbers:
+        • Qty  → numeric int (coerces non‑numeric to 0).
+        • TotalCost → numeric float (strips commas, currency symbols).
+  • Alias list unchanged from v0.11 (includes “Name”).
+  • All other logic (filters, cascade, PDF, filename) unchanged.
 """
 
-import glob
-import re
+import glob, re
 from datetime import datetime
 from pathlib import Path
 
@@ -38,14 +20,12 @@ from fpdf import FPDF
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Helper functions
+# Helpers
 # ───────────────────────────────────────────────────────────────────────────────
 def find_col(df: pd.DataFrame, aliases: list[str]) -> str | None:
-    """Return first column whose lowercase header contains any alias substring."""
     for alias in aliases:
-        alias = alias.lower()
         for col in df.columns:
-            if alias in col.lower():
+            if alias.lower() in col.lower():
                 return col
     return None
 
@@ -66,8 +46,7 @@ def capacity_val(m: str) -> float:
 
 
 def alt_models(model: str) -> list[str]:
-    alts: list[str] = []
-    swap = {
+    alts, swap = [], {
         r"fr-d720": "FR-A820",
         r"fr-e720": "FR-A820",
         r"fr-d740": "FR-A840",
@@ -75,17 +54,16 @@ def alt_models(model: str) -> list[str]:
         r"fr-a820": "FR-D720",
         r"fr-a840": "FR-D740",
     }
-    for patt, repl in swap.items():
-        if re.match(patt, model, re.I):
-            alt = re.sub(patt, repl, model, flags=re.I)
+    for p, rpl in swap.items():
+        if re.match(p, model, re.I):
+            alt = re.sub(p, rpl, model, flags=re.I)
             if "-1" not in alt and re.match(r"fr-a8", alt, re.I):
                 alt += "-1"
             alts.append(alt)
     for s in ["D", "E", "F", "A"]:
         if s == series_tag(model):
             continue
-        alt = re.sub(r"fr-[a-z]", f"FR-{s}", model, flags=re.I)
-        alts.append(alt)
+        alts.append(re.sub(r"fr-[a-z]", f"FR-{s}", model, flags=re.I))
     return list(dict.fromkeys(alts))
 
 
@@ -97,41 +75,51 @@ def money(v) -> str:
 # Load CSVs
 # ───────────────────────────────────────────────────────────────────────────────
 DATA = Path(__file__).parent / "data"
-inv_df = pd.read_csv(DATA / "VFD_PRICE_LAST.csv").rename(columns=lambda c: c.strip())
+inv_df  = pd.read_csv(DATA / "VFD_PRICE_LAST.csv").rename(columns=lambda c: c.strip())
 p127_df = pd.read_csv(DATA / "VFD_PRICE_JULY_2025.csv").rename(columns=lambda c: c.strip())
 list_df = pd.read_csv(DATA / "VFD_Price_SISL_Final.csv").rename(columns=lambda c: c.strip())
 
-# ── Auto‑detect essential columns ─────────────────────────────────────────────
+# Detect inventory headers
 inv_model = find_col(inv_df, ["model", "material", "item", "product", "name"])
 inv_qty   = find_col(inv_df, ["qty", "quantity", "stock", "qty owned", "qtyowned", "on hand"])
 inv_cost  = find_col(inv_df, [
     "total cost", "totalcost", "total value", "amount",
     "total price", "inventory value", "value",
 ])
-
 if None in (inv_model, inv_qty, inv_cost):
-    print("\nInventory CSV headers detected:", list(inv_df.columns))
-    raise ValueError("Inventory CSV is missing a Model, Qty, or Total Cost column.")
+    print("Inventory headers:", list(inv_df.columns))
+    raise ValueError("Inventory CSV lacks Model, Qty, or Total Cost column.")
 
 inv_df = inv_df.rename(columns={inv_model: "Model", inv_qty: "Qty", inv_cost: "TotalCost"})
 
+# ▸ Sanitise numeric columns
+inv_df["Qty"] = (
+    pd.to_numeric(inv_df["Qty"].astype(str).str.replace(r"[^\d\-]", "", regex=True), errors="coerce")
+    .fillna(0)
+    .astype(int)
+)
+inv_df["TotalCost"] = (
+    pd.to_numeric(inv_df["TotalCost"].astype(str).str.replace(r"[^\d.\-]", "", regex=True), errors="coerce")
+    .fillna(0.0)
+)
+
+# Detect price‑list headers
 list_model = find_col(list_df, ["model", "material", "item", "product", "name"])
 list_price = find_col(list_df, ["list price", "price"])
 p127_model = find_col(p127_df, ["model", "material", "item", "product", "name"])
 p127_price = find_col(p127_df, ["1.27", "1_27", "1-27"])
-
 if None in (list_model, list_price, p127_model, p127_price):
-    raise ValueError("Price‑list CSVs are missing required columns; please check headers.")
+    raise ValueError("Price‑list CSVs missing required columns.")
 
 list_price_map = dict(zip(list_df[list_model], list_df[list_price]))
 p127_map       = dict(zip(p127_df[p127_model], p127_df[p127_price]))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Build rows
+# Build report rows
 # ───────────────────────────────────────────────────────────────────────────────
 rows = []
 for _, r in inv_df.iterrows():
-    model, qty = str(r["Model"]).strip(), r["Qty"]
+    model, qty = str(r["Model"]).strip(), int(r["Qty"])
     if qty == 0 or model.upper() == "FR-S520SE-0.2K-19" or "PEC" in model.upper():
         continue
 
@@ -177,7 +165,7 @@ COLS = [
 ]
 
 pdf = FPDF("P", "mm", "A4")
-pdf.set_margins(15.24, 15.24, 15.24)  # 0.6″
+pdf.set_margins(15.24, 15.24, 15.24)
 pdf.add_page()
 pdf.set_auto_page_break(True, 15)
 
@@ -199,22 +187,17 @@ for _, row in df.iterrows():
     for col, w in COLS:
         v = row[col]
         txt = (
-            f"{v:,.2f}%"
-            if col == "GP%" and pd.notna(v)
-            else money(v)
-            if col != "Model"
+            f"{v:,.2f}%" if col == "GP%" and pd.notna(v)
+            else money(v) if col != "Model"
             else row["Model"]
         )
         pdf.cell(w, 5, txt, 1, 0, "C" if col != "Model" else "L", fill=fill)
     pdf.ln()
     fill = not fill
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Save PDF with auto‑incremented version per day
-# ───────────────────────────────────────────────────────────────────────────────
+# Save PDF
 PDF_DIR = Path(__file__).parent / "pdf_reports"
 PDF_DIR.mkdir(exist_ok=True)
-
 date_tag = datetime.now(tz.gettz("Asia/Dhaka")).strftime("%y%m%d")
 existing = sorted(glob.glob(str(PDF_DIR / f"SISL_VFD_PL_{date_tag}_V.*.pdf")))
 ver = int(re.search(r"_V\.(\d+)\.pdf$", existing[-1]).group(1)) + 1 if existing else 1
