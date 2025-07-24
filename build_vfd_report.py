@@ -1,212 +1,127 @@
 #!/usr/bin/env python3
 """
-SISL VFD Stock Report Generator
+SISL VFD Stock Report Generator v0.5
 
-• Place exactly three CSVs in ./data/:
-  1. Inventory        (has “Qty owned” & “Total cost” columns)
-  2. 1.27 price list  (has a “1.27” column)
-  3. List‑Price map   (ideally named VFD_Price_SISL_Final.csv)
-
-• Excludes zero‑qty, FR‑S520SE‑0.2K‑19, and “PEC”
-• Calculates COGS, COGS×1.75, List Price, 1.27 prices, discounts, GP %
-• Sorts by capacity (0.4 K → 400 K) then D→E→F→A→HEL
-• Outputs an A4‑portrait PDF (0.6″ margins) in ./pdf_reports/
-  with auto‑incremented version tag.
+Generates an A4-portrait PDF (0.6" margins) listing VFD inventory with costs,
+list prices, discounts, and gross profit margin, sorted by capacity and series.
 """
 
 import os
 import re
-import glob
-from datetime import datetime
 import pandas as pd
 from fpdf import FPDF
+from datetime import datetime
 
-# ─── CONFIG ─────────────────────────────────────────────
-DATA_DIR    = "data"
-OUT_DIR     = "pdf_reports"
-MARGIN_INCH = 0.6
-ROW_H       = 5
-HDR_FONT    = 7
-BODY_FONT   = 7
+# --- Configuration ---
+DATA_DIR    = 'data'
+PDF_DIR     = 'pdf_reports'
+VERSION     = '0.5'
+INVENTORY_CSV = os.path.join(DATA_DIR, 'VFD_PRICE_LAST.csv')
+PRICE127_CSV  = os.path.join(DATA_DIR, 'VFD_PRICE_JULY_2025.csv')
+MASTER_CSV    = os.path.join(DATA_DIR, 'VFD_Price_SISL_Final.csv')
 
-# ─── UTIL ───────────────────────────────────────────────
-def money(x):
-    try:
-        return f"{float(x):,.2f}"
-    except:
-        return ""
+# --- Load CSVs ---
+df_inv    = pd.read_csv(INVENTORY_CSV)
+df_127    = pd.read_csv(PRICE127_CSV)
+df_master = pd.read_csv(MASTER_CSV)
 
-# ─── DETECT CSVs ────────────────────────────────────────
-paths = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-inv_csv = price127_csv = listprice_csv = None
+# --- Normalize column names ---
+df_inv.columns    = df_inv.columns.str.strip()
+df_127.columns    = df_127.columns.str.strip()
+df_master.columns = df_master.columns.str.strip()
 
-# Prefer explicit filename for list‑price
-for p in paths:
-    if os.path.basename(p).lower() == "vfd_price_sisl_final.csv":
-        listprice_csv = p
-        break
+# --- Identify and rename key columns ---
+# Inventory: Model, Qty owned, Total cost
+df_inv.rename(columns={'Qty owned': 'Qty', 'Total cost': 'TotalCost'}, inplace=True)
+# Price127: rename first column to Model, find the '1.27' column
+df_127.rename(columns={df_127.columns[0]: 'Model'}, inplace=True)
+col_127 = [c for c in df_127.columns if '1.27' in c][0]
+df_127.rename(columns={col_127: 'Price127'}, inplace=True)
+# Master: rename first column to Model, find list-price column
+df_master.rename(columns={df_master.columns[0]: 'Model'}, inplace=True)
+col_list = [c for c in df_master.columns if 'List' in c][0]
+df_master.rename(columns={col_list: 'ListPrice'}, inplace=True)
 
-# Identify inventory and 1.27 files by header
-for p in paths:
-    hdr = pd.read_csv(p, nrows=0).columns.str.strip().tolist()
-    if {"Qty owned", "Total cost"}.issubset(hdr):
-        inv_csv = p
-    elif "1.27" in hdr:
-        price127_csv = p
+# --- Merge dataframes ---
+df = (
+    df_inv[['Model', 'Qty', 'TotalCost']]
+    .merge(df_master[['Model', 'ListPrice']], on='Model', how='left')
+    .merge(df_127[['Model', 'Price127']], on='Model', how='left')
+)
 
-# Fallback: the remaining file is list‑price
-if not listprice_csv:
-    leftovers = [p for p in paths if p not in (inv_csv, price127_csv)]
-    if leftovers:
-        listprice_csv = leftovers[0]
+# --- Apply filters ---
+# Exclude zero-qty, FR-S520SE-0.2K-19, and any 'PEC' entries
+mask = (
+    (df['Qty'] > 0)
+    & (df['Model'] != 'FR-S520SE-0.2K-19')
+    & (~df['Model'].str.contains('PEC', na=False))
+)
+df = df.loc[mask].copy()
 
-if not all((inv_csv, price127_csv, listprice_csv)):
-    raise FileNotFoundError(f"Expected 3 CSVs in {DATA_DIR}, found: {paths}")
+# --- Calculations ---
+df['COGS']         = df['TotalCost'] / df['Qty']
+df['COGS_1.75']    = df['COGS'] * 1.75
+df['Disc20']       = df['ListPrice'] * 0.80
+df['Disc25']       = df['ListPrice'] * 0.75
+df['Disc30']       = df['ListPrice'] * 0.70
+df['GP%']          = (df['ListPrice'] - df['COGS']) / df['ListPrice'] * 100
 
-# ─── HELPERS ────────────────────────────────────────────
-def parse_listprice(fp):
-    df = pd.read_csv(fp, dtype=str, keep_default_na=False).applymap(str.strip)
-    mp = {}
-    for _, row in df.iterrows():
-        cells = [c for c in row if c]
-        for i, c in enumerate(cells):
-            if c.startswith("FR-"):
-                model = c.split()[0]
-                for nxt in cells[i+1:]:
-                    if re.fullmatch(r"[\d,]+(?:\.\d+)?", nxt):
-                        mp[model] = float(nxt.replace(",", ""))
-                        break
-    return mp
-
-def fallback127(model, lookup):
-    m = re.search(r"-(?:H)?([\d.]+)K", model)
-    if not m: return None
-    cap = m.group(1) + "K"
-    if "720" in model: return lookup.get(f"FR-E820-{cap}-1")
-    if "740" in model: return lookup.get(f"FR-E840-{cap}-1")
-    return None
-
-def list_price(model, lp):
-    if model in lp: return lp[model]
-    m = re.search(r"-(?:H)?([\d.]+)K", model)
-    if not m: return None
-    cap = m.group(1) + "K"
-    if any(t in model for t in ("D720", "D720S", "E720", "E820")):
-        return lp.get(f"FR-A820-{cap}-1") or lp.get(f"FR-E820-{cap}-1")
-    if any(t in model for t in ("D740", "E740", "E840")):
-        return lp.get(f"FR-A840-{cap}-1") or lp.get(f"FR-E840-{cap}-1")
-    return None
-
-def series_tag(model):
-    m = re.match(r"FR-([A-Z]+?)-", model)
-    if not m: return ""
-    tag = m.group(1)
-    return "H" if tag == "HEL" else tag[0]
-
-def capacity_val(model):
-    m = re.search(r"-(?:H)?([\d.]+)K", model)
+# --- Extract sort keys: capacity and series ---
+def extract_capacity(m):
+    m = re.search(r'-(\d+\.?\d*)K', m)
     return float(m.group(1)) if m else 0.0
 
-# ─── LOAD & PROCESS ────────────────────────────────────
-lp_map = parse_listprice(listprice_csv)
+def extract_series(m):
+    m = re.match(r'FR-([A-Z]+)\d', m)
+    return m.group(1) if m else ''
 
-inv = pd.read_csv(inv_csv)
-inv.columns = inv.columns.str.strip()
-col_src = "Name" if "Name" in inv.columns else "Model"
-inv["Model"] = (
-    inv[col_src].astype(str)
-       .apply(lambda s: s.split("||")[-1].strip())
-       .replace({"FR-D720S-025-NA": "FR-D720S-0.4K"})
-)
-inv = inv[(inv["Qty owned"] > 0) & ~inv["Model"].isin({"FR-S520SE-0.2K-19", "PEC"})]
+df['Capacity']    = df['Model'].apply(extract_capacity)
+df['Series']      = df['Model'].apply(extract_series)
+order_map = {'D': 0, 'E': 1, 'F': 2, 'A': 3, 'HEL': 4}
+df['SeriesOrder'] = df['Series'].map(order_map).fillna(5)
 
-inv["Qty"]       = inv["Qty owned"].astype(int)
-inv["TotalCost"] = inv["Total cost"].str.replace(",", "").astype(float)
-inv["COGS"]      = inv["TotalCost"] / inv["Qty"]
-inv["COGS_x1.75"] = inv["COGS"] * 1.75
+# --- Sort dataframe ---
+df.sort_values(['Capacity','SeriesOrder'], inplace=True)
 
-p127 = pd.read_csv(price127_csv)
-p127_map = dict(zip(
-    p127.iloc[:,0].str.strip(),
-    p127.iloc[:,1].astype(str).str.replace(",", "").astype(float)
-))
-inv["1.27"]     = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
-inv["Series"]   = inv["Model"].apply(series_tag)
-inv["ListPrice"]= inv["Model"].apply(lambda m: list_price(m, lp_map))
+# --- Prepare PDF output ---
+os.makedirs(PDF_DIR, exist_ok=True)
+today_str    = datetime.now().strftime('%Y%m%d')
+output_file  = f'SISL_VFD_Stock_Report_v{VERSION}_{today_str}.pdf'
+output_path  = os.path.join(PDF_DIR, output_file)
 
-inv["Disc20"] = inv["ListPrice"] * 0.80
-inv["Disc25"] = inv["ListPrice"] * 0.75
-inv["Disc30"] = inv["ListPrice"] * 0.70
-inv["GPpct"]  = (inv["ListPrice"] - inv["COGS"]) / inv["COGS"] * 100
-
-inv["Capacity"]    = inv["Model"].apply(capacity_val)
-order_map          = {"D":0, "E":1, "F":2, "A":3, "H":4}
-inv["SeriesOrder"] = inv["Series"].map(order_map).fillna(99)
-inv.sort_values(["Capacity", "SeriesOrder"], inplace=True, ignore_index=True)
-inv.insert(0, "SL", range(1, len(inv) + 1))
-
-# ─── PDF OUTPUT ─────────────────────────────────────────
-class StockPDF(FPDF):
-    def header(self):
-        self.set_font("Arial", "B", 16)
-        self.cell(0, 8, "VFD STOCK LIST", 0, 1, 'C')
-        self.ln(1)
-        self.set_font("Arial", "", 10)
-        self.cell(0, 5, datetime.now().strftime("Date: %d %B, %Y"), 0, 1, 'C')
-        self.cell(0, 5, "Smart Industrial Solution Ltd.", 0, 1, 'C')
-        self.ln(4)
-    def footer(self):
-        self.set_y(-12)
-        self.set_font("Arial", "I", 8)
-        self.cell(0, 6, f"Page {self.page_no()}", 0, 0, 'C')
-
-cols = [
-    ("SL",8,'C'), ("Model",34,'L'), ("Qty",8,'C'),
-    ("List Price",17,'R'), ("20% Disc",17,'R'), ("25% Disc",17,'R'),
-    ("30% Disc",17,'R'), ("GP%",11,'R'), ("COGS",17,'R'),
-    ("COGS ×1.75",18,'R'), ("1.27",17,'R'),
-]
-
-pdf = StockPDF('P', 'mm', 'A4')
-margin_mm = MARGIN_INCH * 25.4
-pdf.set_margins(margin_mm, 15, margin_mm)
-pdf.set_auto_page_break(True, 15)
+pdf = FPDF(orientation='P', unit='in', format='A4')
+pdf.set_margins(0.6, 0.6, 0.6)
+pdf.set_auto_page_break(auto=True, margin=0.6)
 pdf.add_page()
 
-pdf.set_font("Arial", "B", HDR_FONT)
-for title, width, align in cols:
-    pdf.cell(width, ROW_H, title, 1, 0, align)
+# --- Header ---
+pdf.set_font('Arial','B',12)
+pdf.cell(0, 0.3, f'SISL VFD Stock Report v{VERSION} – {datetime.now():%Y-%m-%d}', ln=True, align='C')
+pdf.ln(0.2)
+
+# --- Table header ---
+pdf.set_font('Arial','B',10)
+headers = ['SL','Model','Qty','COGS','COGS×1.75','ListPrice','1.27','20% Disc','25% Disc','30% Disc','GP%']
+col_widths = [0.4, 1.8, 0.5, 0.7, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.6]
+for h,w in zip(headers, col_widths): pdf.cell(w, 0.3, h, border=1, align='C')
 pdf.ln()
 
-pdf.set_font("Arial", "", BODY_FONT)
-shade = False
-for _, r in inv.iterrows():
-    fill = 242 if shade else 255
-    pdf.set_fill_color(fill, fill, fill)
-    pdf.cell(cols[0][1], ROW_H, str(int(r["SL"])), 1, 0, 'C', shade)
-    pdf.cell(cols[1][1], ROW_H, r["Model"], 1, 0, 'L', shade)
-    pdf.cell(cols[2][1], ROW_H, str(int(r["Qty"])), 1, 0, 'C', shade)
-    pdf.cell(cols[3][1], ROW_H, money(r["ListPrice"]), 1, 0, 'R', shade)
-    pdf.cell(cols[4][1], ROW_H, money(r["Disc20"]), 1, 0, 'R', shade)
-    pdf.cell(cols[5][1], ROW_H, money(r["Disc25"]), 1, 0, 'R', shade)
-    pdf.cell(cols[6][1], ROW_H, money(r["Disc30"]), 1, 0, 'R', shade)
-    pdf.cell(cols[7][1], ROW_H, (f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else ""), 1, 0, 'R', shade)
-    pdf.cell(cols[8][1], ROW_H, money(r["COGS"]), 1, 0, 'R', shade)
-    pdf.cell(cols[9][1], ROW_H, money(r["COGS_x1.75"]), 1, 0, 'R', shade)
-    pdf.cell(cols[10][1],ROW_H, money(r["1.27"]), 1, 0, 'R', shade)
+# --- Table rows ---
+pdf.set_font('Arial','',9)
+for i, row in enumerate(df.itertuples(index=False), start=1):
+    pdf.cell(col_widths[0], 0.25, str(i), 1, 0, 'C')
+    pdf.cell(col_widths[1], 0.25, row.Model, 1, 0, 'L')
+    pdf.cell(col_widths[2], 0.25, f'{int(row.Qty)}', 1, 0, 'C')
+    pdf.cell(col_widths[3], 0.25, f'{row.COGS:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[4], 0.25, f'{row.COGS_1.75:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[5], 0.25, f'{row.ListPrice:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[6], 0.25, f'{(row.Price127 if pd.notna(row.Price127) else 0):,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[7], 0.25, f'{row.Disc20:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[8], 0.25, f'{row.Disc25:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[9], 0.25, f'{row.Disc30:,.2f}', 1, 0, 'R')
+    pdf.cell(col_widths[10],0.25, f'{row._10:,.2f}%',1,0,'R')
     pdf.ln()
-    shade = not shade
 
-pdf.set_font("Arial", "B", BODY_FONT)
-pdf.cell(cols[0][1] + cols[1][1], ROW_H, "Total", 1, 0, 'R')
-pdf.cell(cols[2][1], ROW_H, str(int(inv["Qty"].sum())), 1, 0, 'C')
-pdf.cell(sum(w for _, w, _ in cols[3:]), ROW_H, "", 1, 0)
-
-os.makedirs(OUT_DIR, exist_ok=True)
-tag       = datetime.now().strftime("%y%m%d")
-existing  = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
-vers      = [int(re.search(r"_V\.(\d{2})\.pdf", f).group(1)) for f in existing] if existing else []
-outfile   = f"SISL_VFD_PL_{tag}_V.{(max(vers) + 1 if vers else 5):02d}.pdf"
-pdf.output(os.path.join(OUT_DIR, outfile))
-
-print("Generated:", outfile)
+# --- Save PDF ---
+pdf.output(output_path)
+print(f"Generated PDF: {output_path}")
