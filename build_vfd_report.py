@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SISL VFD STOCK LIST generator  • version 0.6  (2025‑07‑24)
+SISL VFD STOCK LIST generator  • version 0.7  (2025‑07‑24)
 
 Repo layout
 -----------
@@ -11,20 +11,22 @@ project‑root/
 │   └─ VFD_Price_SISL_Final.csv   # master list‑price map
 └─ pdf_reports/                   # output PDFs
 
-Key rules
----------
-•  Skip rows with Qty = 0, the model “FR‑S520SE‑0.2K‑19”, or any model containing “PEC”.
-•  Calculate COGS, COGS×1.75, List Price, 1.27 Price, 20 / 25 / 30 % discounts, GP %.
-•  Sort by capacity (0.4 K → 400 K) then series D → E → F → A → HEL.
-•  List‑price lookup cascade:
-     1) exact match
-     2) D/E “720 / 740” → A “820 / 840” equivalent
-     3) any other series with the same capacity
-•  Output A4‑portrait PDF (0.6″ margins) named
-     SISL_VFD_PL_<YYMMDD>_V.<nn>.pdf   (nn auto‑increments per day)
+Rules
+-----
+• Skip rows with Qty = 0, the model “FR‑S520SE‑0.2K‑19”, or any model containing “PEC”.
+• Calculate COGS, COGS×1.75, List Price, 1.27 Price, 20 / 25 / 30 % discounts, GP %.
+• Sort by capacity (0.4 K → 400 K) then series D → E → F → A → HEL.
+• List‑price lookup cascade:
+    1. exact match
+    2. D/E 720 / 740 ↔ A 820 / 840 equivalent
+    3. cross‑series same capacity (A ⇆ E ⇆ F ⇆ D)
+• Output A4‑portrait PDF (0.6″ margins) named
+    SISL_VFD_PL_<YYMMDD>_V.<nn>.pdf   (auto‑increment <nn> per day)
 """
 
-import os, re, glob
+import glob
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from fpdf import FPDF
 # Helpers
 # ───────────────────────────────────────────────────────────────────────────────
 def series_tag(model: str) -> str:
+    """Return one‑letter series tag D/E/F/A/H for a model name."""
     if re.search(r"FR-HEL", model, re.I):
         return "H"
     m = re.match(r"FR-([A-Z])", model, re.I)
@@ -47,9 +50,7 @@ ORDER_MAP = {"D": 0, "E": 1, "F": 2, "A": 3, "H": 4}
 
 
 def capacity_val(model: str) -> float:
-    """
-    Returns numeric capacity in kW (e.g. 'FR-F840-37K-1' → 37.0).
-    """
+    """Extract capacity in kW (as float) from model string."""
     m = re.search(r"-(?:H)?([\d.]+)K", model, re.I)
     return float(m.group(1)) if m else 0.0
 
@@ -58,13 +59,12 @@ def alt_models(model: str) -> list[str]:
     """
     Generate fallback model names for list‑price lookup.
 
-    1. D/E 720 / 740  ⟷ A 820 / 840 (same capacity)
-    2. Cross‑series same capacity (family swap)
+    1. D/E “720 / 740” ⟷ A “820 / 840” (same capacity)
+    2. Cross‑series same capacity (F⇄A⇄E⇄D)
     """
     alts: list[str] = []
-    cap = f"{capacity_val(model):.0f}K"
     # 720 / 820 mapping
-    subs = {
+    mapping = {
         r"FR-D720": "FR-A820",
         r"FR-E720": "FR-A820",
         r"FR-D740": "FR-A840",
@@ -72,26 +72,28 @@ def alt_models(model: str) -> list[str]:
         r"FR-A820": "FR-D720",
         r"FR-A840": "FR-D740",
     }
-    for patt, repl in subs.items():
+    for patt, repl in mapping.items():
         if re.match(patt, model, re.I):
             alt = re.sub(patt, repl, model, flags=re.I)
-            # Ensure trailing '-1' for A/HEL series
+            # ensure trailing “-1” for A‑series
             if "-1" not in alt and re.match(r"FR-A8", alt, re.I):
                 alt += "-1"
             alts.append(alt)
-    # Cross‑series same capacity F⇄A⇄E⇄D
-    series_order = ["D", "E", "F", "A"]
-    cur_tag = series_tag(model)
-    base = re.sub(r"FR-[A-Z]", "FR-X", model, flags=re.I)  # placeholder
-    for s in series_order:
-        if s == cur_tag:
+
+    # Cross‑series swap
+    series_cycle = ["D", "E", "F", "A"]
+    cur = series_tag(model)
+    base = re.sub(r"FR-[A-Z]", "FR-X", model, flags=re.I)
+    for s in series_cycle:
+        if s == cur:
             continue
         alt = re.sub(r"FR-X", f"FR-{s}", base, flags=re.I)
         alts.append(alt)
-    return list(dict.fromkeys(alts))  # preserve order, drop dups
+    return list(dict.fromkeys(alts))  # preserve order, drop duplicates
 
 
-def money(v: float | int | pd.NA) -> str:
+def money(v) -> str:
+    """Thousands‑sep. numbers; blank for NaN / None."""
     return f"{v:,.0f}" if pd.notna(v) else ""
 
 
@@ -103,31 +105,20 @@ INV_CSV = DATA_DIR / "VFD_PRICE_LAST.csv"
 P127_CSV = DATA_DIR / "VFD_PRICE_JULY_2025.csv"
 LIST_CSV = DATA_DIR / "VFD_Price_SISL_Final.csv"
 
-inv_df = pd.read_csv(INV_CSV).rename(
-    columns=lambda c: c.strip().title().replace(" ", "")
-)  # normalize headers
-price127_df = pd.read_csv(P127_CSV)
-list_df = pd.read_csv(LIST_CSV)
+inv_df = pd.read_csv(INV_CSV).rename(columns=lambda c: c.strip().title().replace(" ", ""))
+price127_df = pd.read_csv(P127_CSV).rename(columns=lambda c: c.strip())
+list_df = pd.read_csv(LIST_CSV).rename(columns=lambda c: c.strip())
 
-# Standardize column names we’ll use
-inv_df = inv_df.rename(columns={"Qtyowned": "Qty", "Totalcost": "TotalCost"})
-price127_df = price127_df.rename(columns=lambda c: c.strip())
-list_df = list_df.rename(columns=lambda c: c.strip())
-
-# Build fast look‑ups
 price127_map = dict(zip(price127_df["Material Name"], price127_df["1.27"]))
 list_price_map = dict(zip(list_df["Model"], list_df["List Price"]))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Construct report DataFrame
+# Build report rows
 # ───────────────────────────────────────────────────────────────────────────────
 rows = []
-for _, row in inv_df.iterrows():
-    model = str(row["Model"]).strip()
-    qty = row["Qty"]
-    cogs = row["TotalCost"] / qty if qty else 0  # unit COGS
-
-    # Skip rules ---------------------------------------------------------------
+for _, r in inv_df.iterrows():
+    model = str(r["Model"]).strip()
+    qty = r["Qty"]
     if (
         qty == 0
         or model.upper() == "FR-S520SE-0.2K-19".upper()
@@ -135,50 +126,42 @@ for _, row in inv_df.iterrows():
     ):
         continue
 
-    # List‑price lookup cascade -------------------------------------------------
-    list_price = list_price_map.get(model)
-    if list_price is None:
+    unit_cogs = r["Totalcost"] / qty if qty else 0.0
+
+    # List price cascade
+    lp = list_price_map.get(model)
+    if lp is None:
         for alt in alt_models(model):
-            list_price = list_price_map.get(alt)
-            if list_price is not None:
+            lp = list_price_map.get(alt)
+            if lp is not None:
                 break
 
-    # 1.27 price
-    price127 = price127_map.get(model)
+    p127 = price127_map.get(model)
+    disc20 = lp * 0.8 if lp else None
+    disc25 = lp * 0.75 if lp else None
+    disc30 = lp * 0.7 if lp else None
+    gp_pct = round((lp - unit_cogs) / lp * 100, 2) if lp and unit_cogs else None
 
-    # Discounts
-    disc20 = list_price * 0.8 if list_price else None
-    disc25 = list_price * 0.75 if list_price else None
-    disc30 = list_price * 0.7 if list_price else None
-
-    # GP%
-    gp_pct = None
-    if list_price and cogs:
-        gp_pct = round((list_price - cogs) / list_price * 100, 2)
-
-    # Build row
     rows.append(
         {
             "Model": model,
             "Qty": qty,
-            "ListPrice": list_price,
+            "ListPrice": lp,
             "20%": disc20,
             "25%": disc25,
             "30%": disc30,
             "GP%": gp_pct,
-            "COGS": cogs,
-            "COGSx1.75": cogs * 1.75 if cogs else None,
-            "1.27": price127,
+            "COGS": unit_cogs,
+            "COGSx1.75": unit_cogs * 1.75 if unit_cogs else None,
+            "1.27": p127,
         }
     )
 
 df = pd.DataFrame(rows)
-
-# Sorting ----------------------------------------------------------------------
 df["CapVal"] = df["Model"].apply(capacity_val)
 df["SeriesOrd"] = df["Model"].apply(lambda m: ORDER_MAP.get(series_tag(m), 99))
 df = df.sort_values(["CapVal", "SeriesOrd"]).reset_index(drop=True)
-df["SL"] = df.index + 1  # serial column
+df["SL"] = df.index + 1
 
 # ───────────────────────────────────────────────────────────────────────────────
 # PDF generation
@@ -198,10 +181,11 @@ COLS = [
 ]
 
 pdf = FPDF(orientation="P", unit="mm", format="A4")
-pdf.set_auto_page_break(auto=True, margin=15)
-pdf.set_margins(15.24, 15.24, 15.24)  # 0.6" = 15.24 mm
+pdf.set_margins(15.24, 15.24, 15.24)  # 0.6″
 pdf.add_page()
+pdf.set_auto_page_break(auto=True, margin=15)
 
+# Header
 pdf.set_font("Helvetica", "B", 14)
 pdf.cell(0, 8, "VFD STOCK LIST", ln=1, align="C")
 pdf.set_font("Helvetica", "", 10)
@@ -218,35 +202,35 @@ pdf.ln()
 
 # Table body
 pdf.set_font("Helvetica", "", 7)
-ROW_H = 5
-fill = False
+ROW_H, fill = 5, False
 for _, r in df.iterrows():
     for col, w in COLS:
-        key = col if col != "COGSx1.75" else "COGSx1.75"
-        v = r[key]
+        val = r[col]
         txt = (
-            f"{v:,.2f}%" if key == "GP%" and pd.notna(v) else money(v)
-            if key != "Model"
+            f"{val:,.2f}%"
+            if col == "GP%" and pd.notna(val)
+            else money(val)
+            if col != "Model"
             else r["Model"]
         )
-        pdf.cell(w, ROW_H, txt, 1, 0, "C" if col != "Model" else "L", fill=fill)
+        align = "C" if col != "Model" else "L"
+        pdf.cell(w, ROW_H, txt, 1, 0, align, fill=fill)
     pdf.ln()
     fill = not fill
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Save PDF with auto‑increment version
+# Save PDF with auto‑incremented version tag
 # ───────────────────────────────────────────────────────────────────────────────
 PDF_DIR = Path(__file__).parent / "pdf_reports"
 PDF_DIR.mkdir(exist_ok=True)
 
 date_tag = datetime.now(tz.gettz("Asia/Dhaka")).strftime("%y%m%d")
-pattern = str(PDF_DIR / f"SISL_VFD_PL_{date_tag}_V.*.pdf")
-existing = sorted(glob.glob(pattern))
+existing = sorted(glob.glob(str(PDF_DIR / f"SISL_VFD_PL_{date_tag}_V.*.pdf")))
 next_ver = (
-    int(re.search(r"_V\.(\d+)\.pdf$", existing[-1]).group(1)) + 1
-    if existing
-    else 1
+    int(re.search(r"_V\.(\d+)\.pdf$", existing[-1]).group(1)) + 1 if existing else 1
 )
+
 outfile = PDF_DIR / f"SISL_VFD_PL_{date_tag}_V.{next_ver:02d}.pdf"
 pdf.output(outfile)
+
 print("✓ Report saved to:", outfile)
