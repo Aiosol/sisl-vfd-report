@@ -1,0 +1,73 @@
+You are my coding assistant for an automated PDF generator that produces a **VFD STOCK LIST** for Smart Industrial Solution Ltd. from three CSV sources. Follow every rule below exactly.
+
+---
+
+#### 🗂️ Repo structure (local paths)
+
+```
+project‑root/
+├─ data/
+│   ├─ VFD_PRICE_LAST.csv        # inventory  (Qty owned, Total cost)
+│   ├─ VFD_PRICE_JULY_2025.csv   # July‑2025 “1.27” price list (1.27 column)
+│   └─ VFD_Price_SISL_Final.csv  # master list‑price map
+├─ build_vfd_report.py           # main script (currently v0.5)
+└─ pdf_reports/                  # output PDFs
+```
+
+---
+
+#### 🎯 Report logic
+
+1. **Row filters**  
+   • Skip any model whose `Qty` = 0.  
+   • Skip model **“FR‑S520SE‑0.2K‑19”**.  
+   • Skip any model name containing **“PEC”** (case‑insensitive).
+
+2. **Per‑model calculations**  
+   • `COGS`, `COGS × 1.75`, `List Price`, `1.27 Price`,  
+     `20 %`, `25 %`, `30 %` discounts, and `GP %`.
+
+3. **Sorting order**  
+   Capacity ascending **0.4 K → 400 K**, then series **D → E → F → A → HEL**.
+
+4. **List‑price lookup cascade**  
+   1. Exact model match.  
+   2. D⇆E “720 / 740” fallback to A‑series equivalents.  
+   3. Cross‑series fallback (A⇆E⇆F⇆D) for same family & capacity.
+
+5. **Helpers**
+
+```python
+def series_tag(model):
+    if re.search(r"FR-HEL", model, re.I): return "H"
+    m = re.match(r"FR-([A-Z])", model); return m.group(1) if m else ""
+
+order_map = {"D":0, "E":1, "F":2, "A":3, "H":4}
+
+def capacity_val(model):
+    m = re.search(r"-(?:H)?([\d.]+)K", model); return float(m.group(1)) if m else 0.0
+```
+
+---
+
+#### 📄 PDF output spec
+
+* A4 portrait, 0.6″ margins.  
+* Header lines: **VFD STOCK LIST**, today’s date, **Smart Industrial Solution Ltd.**  
+* Column widths (mm):  
+  SL 8 | Model 34 | Qty 8 | List 17 | 20 % 17 | 25 % 17 | 30 % 17 | GP % 11 | COGS 17 | COGS×1.75 18 | 1.27 17  
+* Filename `SISL_VFD_PL_<YYMMDD>_V.<nn>.pdf` (auto‑increment `<nn>`).
+
+---
+
+#### 🔧 Environment
+
+`requirements.txt`
+
+```
+pandas>=2.2
+fpdf2==2.7.8
+python-dateutil
+```
+
+---
