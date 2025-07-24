@@ -65,6 +65,18 @@ SERIES_ORDER = {"D": 0, "E": 1, "F": 2, "A": 3, "HEL": 4}
 
 DATE_STR = datetime.now(tzlocal()).strftime("%y%m%d")
 
+CANDIDATE_MODEL_COLS = [
+    "Model",
+    "Material Name",
+    "Description",
+    "Model Name",
+    "Material",
+    "Part",
+    "Product",
+    "Item",
+    "Model_Name",
+]
+
 
 # ──────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -149,6 +161,20 @@ def next_pdf_filename() -> Path:
     return PDF_DIR / f"SISL_VFD_PL_{DATE_STR}_V.{ver:02d}.pdf"
 
 
+def ensure_model_col(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a 'Model' column exists by renaming compatible headers."""
+    df.rename(columns=lambda c: c.strip(), inplace=True)
+    for cand in CANDIDATE_MODEL_COLS:
+        if cand in df.columns:
+            if cand != "Model":
+                df.rename(columns={cand: "Model"}, inplace=True)
+            break
+    else:
+        raise ValueError("CSV missing a recognisable 'Model' column.")
+    df["Model"] = df["Model"].astype(str).str.strip()
+    return df
+
+
 # ──────────────────────────────────────────────────────────
 # LOAD DATA
 # ──────────────────────────────────────────────────────────
@@ -159,51 +185,35 @@ try:
 except Exception as e:
     sys.exit(f"ERROR reading CSVs: {e}")
 
-# Normalise column names
-inv_df.rename(
-    columns=lambda c: c.strip(),
-    inplace=True,
-)
-price127_df.rename(
-    columns=lambda c: c.strip(),
-    inplace=True,
-)
-master_df.rename(
-    columns=lambda c: c.strip(),
-    inplace=True,
-)
+# Ensure model columns present & cleaned
+inv_df = ensure_model_col(inv_df)
+price127_df = ensure_model_col(price127_df)
+master_df = ensure_model_col(master_df)
+
+# Normalise inventory Quantity column name
+if "Qty owned" in inv_df.columns and "Qty" not in inv_df.columns:
+    inv_df.rename(columns={"Qty owned": "Qty"}, inplace=True)
 
 # Mandatory columns check
-for col in ("Qty", "Qty owned"):
-    if col in inv_df.columns:
-        inv_df.rename(columns={col: "Qty"}, inplace=True)
-if "Total cost" not in inv_df.columns or "Qty" not in inv_df.columns:
+if "Qty" not in inv_df.columns or "Total cost" not in inv_df.columns:
     sys.exit("Inventory CSV must have 'Qty' and 'Total cost' columns.")
-
 if "1.27" not in price127_df.columns:
     sys.exit("Price list CSV must contain '1.27' column.")
 
-# Standardise key column 'Model'
-for df in (inv_df, price127_df, master_df):
-    if "Material Name" in df.columns and "Model" not in df.columns:
-        df.rename(columns={"Material Name": "Model"}, inplace=True)
-    if "Model" not in df.columns:
-        sys.exit("CSV missing 'Model' column.")
-
-# Clean model strings
-for df in (inv_df, price127_df, master_df):
-    df["Model"] = df["Model"].astype(str).str.strip()
-
-# Map for quick lookup
+# Build lookup maps
 price127_map = dict(
     zip(price127_df["Model"], price127_df["1.27"].astype(float, errors="ignore"))
 )
-listprice_map = dict(
-    zip(master_df["Model"], master_df.iloc[:, master_df.columns.get_loc("Model") + 1].astype(float, errors="ignore"))
-    if "List Price" not in master_df.columns
-    else zip(master_df["Model"], master_df["List Price"].astype(float, errors="ignore"))
-)
 
+if "List Price" in master_df.columns:
+    listprice_map = dict(
+        zip(master_df["Model"], master_df["List Price"].astype(float, errors="ignore"))
+    )
+else:
+    # Assume the column immediately after 'Model' holds list price
+    lp_col_idx = master_df.columns.get_loc("Model") + 1
+    lp_series = master_df.iloc[:, lp_col_idx].astype(float, errors="ignore")
+    listprice_map = dict(zip(master_df["Model"], lp_series))
 
 # ──────────────────────────────────────────────────────────
 # TRANSFORM
@@ -287,7 +297,15 @@ row_h = 5
 for _, record in df.iterrows():
     for (col_name, col_width, align) in COLS:
         val = record.get(col_name, "")
-        if col_name in {"ListPrice", "20% Disc", "25% Disc", "30% Disc", "COGS", "COGS×1.75", "1.27"}:
+        if col_name in {
+            "ListPrice",
+            "20% Disc",
+            "25% Disc",
+            "30% Disc",
+            "COGS",
+            "COGS×1.75",
+            "1.27",
+        }:
             txt = money(val)
         elif col_name == "GP%":
             txt = percent(val)
