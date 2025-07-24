@@ -5,8 +5,8 @@ SISL VFD Stock Report Generator
 • Drop exactly three CSVs into ./data/:
   - Inventory     (contains “Qty owned” & “Total cost”)
   - 1.27 price     (contains “1.27” column)
-  - List‑Price map (the remaining CSV)
-• Excludes zero‑qty, FR‑S520SE‑0.2K‑19, and “PEC”
+  - List‑Price map (the remaining CSV, ideally named VFD_Price_SISL_Final.csv)
+• Excludes zero‑qty, FR‑S520SE‑0.2K-19, and “PEC”
 • Calculates COGS, COGS×1.75, List Price, 1.27 prices,
   discount tiers (20/25/30%), and GP%
 • Sorts by capacity then series (D→E→F→A→HEL)
@@ -37,6 +37,13 @@ def money(x):
 paths = glob.glob(os.path.join(DATA_DIR, "*.csv"))
 inv_csv = price127_csv = listprice_csv = None
 
+# Explicitly pick List‑Price CSV if named correctly
+for p in paths:
+    if os.path.basename(p).lower() == 'vfd_price_sisl_final.csv':
+        listprice_csv = p
+        break
+
+# Identify Inventory & 1.27 files via headers
 for p in paths:
     hdrs = pd.read_csv(p, nrows=0).columns.str.strip().tolist()
     if "Qty owned" in hdrs and "Total cost" in hdrs:
@@ -44,11 +51,13 @@ for p in paths:
     elif "1.27" in hdrs:
         price127_csv = p
 
-remaining = [p for p in paths if p not in (inv_csv, price127_csv)]
-if remaining:
-    listprice_csv = remaining[0]
+# If List‑Price CSV not set explicitly, use the leftover
+if not listprice_csv:
+    leftovers = [p for p in paths if p not in (inv_csv, price127_csv)]
+    if leftovers:
+        listprice_csv = leftovers[0]
 
-if not all((inv_csv, price127_csv, listprice_csv)):
+if not all([inv_csv, price127_csv, listprice_csv]):
     raise FileNotFoundError(f"Expected 3 CSVs in {DATA_DIR}, found: {paths}")
 
 # ─── HELPERS ────────────────────────────────────────────
@@ -69,7 +78,7 @@ def parse_listprice(path):
 def fallback127(m, lookup):
     mm = re.search(r"-(?:H)?([\d.]+)K", m)
     if not mm: return None
-    cap = mm.group(1) + "K"
+    cap = mm.group(1)+"K"
     if "720" in m: return lookup.get(f"FR-E820-{cap}-1")
     if "740" in m: return lookup.get(f"FR-E840-{cap}-1")
     return None
@@ -108,7 +117,7 @@ inv["Model"] = (
 inv = inv[(inv["Qty owned"]>0) & ~inv["Model"].isin({"FR-S520SE-0.2K-19","PEC"})]
 
 inv["Qty"]       = inv["Qty owned"].astype(int)
-inv["TotalCost"] = inv["Total cost"].astype(str).str.replace(",", "").astype(float)
+inv["TotalCost"] = inv["Total cost"].astype(str).str.replace(",","").astype(float)
 inv["COGS"]      = inv["TotalCost"] / inv["Qty"]
 inv["COGS_x1.75"]= inv["COGS"] * 1.75
 
@@ -120,7 +129,6 @@ p127_map = dict(zip(
 inv["1.27"] = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
 
 inv["Series"]    = inv["Model"].apply(get_series)
-# *** HEL rows now get List Price too ***
 inv["ListPrice"] = inv["Model"].apply(lambda m: list_price(m, lp_map))
 
 inv["Disc20"] = inv["ListPrice"] * 0.80
