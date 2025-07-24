@@ -117,6 +117,7 @@ inv["Model"] = (
        .replace({"FR-D720S-025-NA": "FR-D720S-0.4K"})
 )
 inv = inv[(inv["Qty owned"]>0) & ~inv["Model"].isin({"FR-S520SE-0.2K-19","PEC"})]
+
 inv["Qty"]       = inv["Qty owned"].astype(int)
 inv["TotalCost"] = inv["Total cost"].str.replace(",","").astype(float)
 inv["COGS"]      = inv["TotalCost"] / inv["Qty"]
@@ -146,19 +147,23 @@ inv.insert(0, "SL", range(1, len(inv)+1))
 class StockPDF(FPDF):
     def header(self):
         self.set_font("Arial","B",16)
-        self.cell(0,8,"VFD STOCK LIST",0,1,'C'); self.ln(1)
-        self.set_font("Arial",10)
+        self.cell(0,8,"VFD STOCK LIST",0,1,'C')
+        self.ln(1)
+        # <-- fix: style must be string, size is third arg -->
+        self.set_font("Arial","",10)
         self.cell(0,5,datetime.now().strftime("Date: %d %B, %Y"),0,1,'C')
-        self.cell(0,5,"Smart Industrial Solution Ltd.",0,1,'C'); self.ln(4)
+        self.cell(0,5,"Smart Industrial Solution Ltd.",0,1,'C')
+        self.ln(4)
     def footer(self):
-        self.set_y(-12); self.set_font("Arial","I",8)
+        self.set_y(-12)
+        self.set_font("Arial","I",8)
         self.cell(0,6,f"Page {self.page_no()}",0,0,'C')
 
 cols = [
     ("SL",8,'C'),("Model",34,'L'),("Qty",8,'C'),
     ("List Price",17,'R'),("20% Disc",17,'R'),("25% Disc",17,'R'),
     ("30% Disc",17,'R'),("GP%",11,'R'),("COGS",17,'R'),
-    ("COGS ×1.75",18,'R'),("1.27",17,'R')
+    ("COGS ×1.75",18,'R'),("1.27",17,'R'),
 ]
 
 pdf = StockPDF('P','mm','A4')
@@ -172,21 +177,21 @@ for title,width,align in cols:
     pdf.cell(width,ROW_H,title,1,0,align)
 pdf.ln()
 
-pdf.set_font("Arial",size=BODY_FONT)
+pdf.set_font("Arial","",BODY_FONT)
 shade = False
 for _, r in inv.iterrows():
-    pdf.set_fill_color(242,242,242) if shade else pdf.set_fill_color(255,255,255)
-    pdf.cell(cols[0][1],ROW_H,str(int(r["SL"])),1,0,'C',shade)
-    pdf.cell(cols[1][1],ROW_H,r["Model"],1,0,'L',shade)
-    pdf.cell(cols[2][1],ROW_H,str(int(r["Qty"])),1,0,'C',shade)
-    pdf.cell(cols[3][1],ROW_H,money(r["ListPrice"]),1,0,'R',shade)
-    pdf.cell(cols[4][1],ROW_H,money(r["Disc20"]),1,0,'R',shade)
-    pdf.cell(cols[5][1],ROW_H,money(r["Disc25"]),1,0,'R',shade)
-    pdf.cell(cols[6][1],ROW_H,money(r["Disc30"]),1,0,'R',shade)
-    pdf.cell(cols[7][1],ROW_H,(f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else ""),1,0,'R',shade)
-    pdf.cell(cols[8][1],ROW_H,money(r["COGS"]),1,0,'R',shade)
-    pdf.cell(cols[9][1],ROW_H,money(r["COGS_x1.75"]),1,0,'R',shade)
-    pdf.cell(cols[10][1],ROW_H,money(r["1.27"]),1,0,'R',shade)
+    pdf.set_fill_color(242,242,242 if shade else 255)
+    pdf.cell( cols[0][1], ROW_H, str(int(r["SL"])),         1,0,'C',shade )
+    pdf.cell( cols[1][1], ROW_H, r["Model"],                1,0,'L',shade )
+    pdf.cell( cols[2][1], ROW_H, str(int(r["Qty"])),        1,0,'C',shade )
+    pdf.cell( cols[3][1], ROW_H, money(r["ListPrice"]),     1,0,'R',shade )
+    pdf.cell( cols[4][1], ROW_H, money(r["Disc20"]),        1,0,'R',shade )
+    pdf.cell( cols[5][1], ROW_H, money(r["Disc25"]),        1,0,'R',shade )
+    pdf.cell( cols[6][1], ROW_H, money(r["Disc30"]),        1,0,'R',shade )
+    pdf.cell( cols[7][1], ROW_H, (f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else ""), 1,0,'R',shade )
+    pdf.cell( cols[8][1], ROW_H, money(r["COGS"]),          1,0,'R',shade )
+    pdf.cell( cols[9][1], ROW_H, money(r["COGS_x1.75"]),    1,0,'R',shade )
+    pdf.cell( cols[10][1],ROW_H, money(r["1.27"]),          1,0,'R',shade )
     pdf.ln()
     shade = not shade
 
@@ -196,10 +201,10 @@ pdf.cell(cols[2][1],ROW_H,str(int(inv["Qty"].sum())),1,0,'C')
 pdf.cell(sum(w for _,w,_ in cols[3:]),ROW_H,"",1,0)
 
 os.makedirs(OUT_DIR, exist_ok=True)
-tag = datetime.now().strftime("%y%m%d")
+tag      = datetime.now().strftime("%y%m%d")
 existing = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
-vers = [int(re.search(r"_V\\.(\\d{2})\\.pdf",f).group(1)) for f in existing] if existing else []
-outfile = f"SISL_VFD_PL_{tag}_V.{(max(vers)+1 if vers else 5):02d}.pdf"
+vers     = [int(re.search(r"_V\.(\d{2})\.pdf",f).group(1)) for f in existing] if existing else []
+outfile  = f"SISL_VFD_PL_{tag}_V.{(max(vers)+1 if vers else 5):02d}.pdf"
 pdf.output(os.path.join(OUT_DIR, outfile))
 
 print("Generated:", outfile)
