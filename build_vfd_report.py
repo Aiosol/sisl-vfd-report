@@ -1,20 +1,50 @@
 #!/usr/bin/env python3
 """
-SISL VFD Stock Report Generator · v0.5 (final)
+SISL VFD Stock Report Generator · v0.6 (git‑enabled)
 
+– Automatically clones / pulls the Git repo that contains the CSVs  
 – Excludes zero‑Qty and model FR‑S520SE‑0.2K‑19  
 – Calculates COGS, COGS×1.75, List Price, 1.27, discounts, GP %  
 – Sort order: capacity then D → E → F → A → HEL  
 – Outputs version‑tagged PDF to ./pdf_reports/
 """
 
-import os, re, glob
+import os, re, glob, subprocess, sys, pathlib
 from datetime import datetime
 import pandas as pd
 from fpdf import FPDF
 
+# ─── GIT SYNC (clone / pull) ───────────────────────────
+GIT_REPO   = "https://github.com/Aiosol/sisl-vfd-report.git"
+CLONE_DIR  = pathlib.Path.cwd() / "repo"      # local clone path
+DATA_SUBDIR = CLONE_DIR / "data"              # CSVs are here
+
+def git_sync():
+    """Clone once or pull latest CSVs each run."""
+    if CLONE_DIR.exists():
+        try:
+            subprocess.run(
+                ["git", "-C", str(CLONE_DIR), "pull", "--ff-only"],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            print("[git] repo updated.")
+        except subprocess.CalledProcessError as e:
+            print("[git] pull failed, using existing clone:", e.stderr.decode().strip())
+    else:
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", GIT_REPO, str(CLONE_DIR)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            print("[git] repo cloned.")
+        except subprocess.CalledProcessError as e:
+            print("[git] clone failed, falling back to local data:", e.stderr.decode().strip())
+
+git_sync()
+
 # ─── CONFIG ────────────────────────────────────────────
-DATA_DIR, OUT_DIR = "data", "pdf_reports"
+DATA_DIR  = str(DATA_SUBDIR) if DATA_SUBDIR.exists() else "data"
+OUT_DIR   = "pdf_reports"
 MARGIN_INCH, ROW_H = 0.6, 5   # inch → mm row height
 HDR_FONT, BODY_FONT = 7, 7
 
@@ -46,7 +76,7 @@ if not listprice_csv:
     listprice_csv = leftovers[0] if leftovers else None
 
 if not all((inv_csv, price127_csv, listprice_csv)):
-    raise FileNotFoundError("Inventory, 1.27, or list‑price CSV missing.")
+    sys.exit("Inventory, 1.27, or list‑price CSV missing after git‑sync.")
 
 # ─── PARSE MASTER LIST‑PRICE CSV ───────────────────────
 def parse_listprice(fp):
@@ -57,7 +87,7 @@ def parse_listprice(fp):
         for i, c in enumerate(cells):
             if c.startswith("FR-"):
                 model = c.split()[0]
-                for nxt in cells[i + 1 :]:
+                for nxt in cells[i + 1:]:
                     if re.fullmatch(r"[\d,]+(?:\.\d+)?", nxt):
                         mp[model] = float(nxt.replace(",", ""))
                         break
@@ -130,9 +160,9 @@ inv = inv[
     & ~inv["Model"].isin({"FR-S520SE-0.2K-19"})
 ]
 
-inv["Qty"] = inv["Qty owned"].astype(int)
-inv["TotalCost"] = inv["Total cost"].str.replace(",", "").astype(float)
-inv["COGS"] = inv["TotalCost"] / inv["Qty"]
+inv["Qty"]        = inv["Qty owned"].astype(int)
+inv["TotalCost"]  = inv["Total cost"].str.replace(",", "").astype(float)
+inv["COGS"]       = inv["TotalCost"] / inv["Qty"]
 inv["COGS_x1.75"] = inv["COGS"] * 1.75
 
 p127 = pd.read_csv(price127_csv)
@@ -142,17 +172,17 @@ p127_map = dict(
         p127.iloc[:, 1].astype(str).str.replace(",", "").astype(float),
     )
 )
-inv["1.27"] = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
-inv["Series"] = inv["Model"].apply(series_tag)
+inv["1.27"]      = inv["Model"].apply(lambda m: p127_map.get(m, fallback127(m, p127_map)))
+inv["Series"]    = inv["Model"].apply(series_tag)
 inv["ListPrice"] = inv["Model"].apply(lambda m: list_price(m, lp_map))
 
 inv["Disc20"] = inv["ListPrice"] * 0.80
 inv["Disc25"] = inv["ListPrice"] * 0.75
 inv["Disc30"] = inv["ListPrice"] * 0.70
-inv["GPpct"] = (inv["ListPrice"] - inv["COGS"]) / inv["COGS"] * 100
+inv["GPpct"]  = (inv["ListPrice"] - inv["COGS"]) / inv["COGS"] * 100
 
-inv["Capacity"] = inv["Model"].apply(capacity_val)
-order_map = {"D": 0, "E": 1, "F": 2, "A": 3, "H": 4}
+inv["Capacity"]    = inv["Model"].apply(capacity_val)
+order_map          = {"D": 0, "E": 1, "F": 2, "A": 3, "H": 4}
 inv["SeriesOrder"] = inv["Series"].map(order_map).fillna(99)
 inv.sort_values(["Capacity", "SeriesOrder"], inplace=True, ignore_index=True)
 inv.insert(0, "SL", range(1, len(inv) + 1))
@@ -174,17 +204,10 @@ class StockPDF(FPDF):
         self.cell(0, 6, f"Page {self.page_no()}", 0, 0, "C")
 
 cols = [
-    ("SL", 8, "C"),
-    ("Model", 34, "L"),
-    ("Qty", 8, "C"),
-    ("List Price", 17, "R"),
-    ("20% Disc", 17, "R"),
-    ("25% Disc", 17, "R"),
-    ("30% Disc", 17, "R"),
-    ("GP%", 11, "R"),
-    ("COGS", 17, "R"),
-    ("COGS ×1.75", 18, "R"),
-    ("1.27", 17, "R"),
+    ("SL", 8, "C"), ("Model", 34, "L"), ("Qty", 8, "C"),
+    ("List Price", 17, "R"), ("20% Disc", 17, "R"), ("25% Disc", 17, "R"),
+    ("30% Disc", 17, "R"), ("GP%", 11, "R"), ("COGS", 17, "R"),
+    ("COGS ×1.75", 18, "R"), ("1.27", 17, "R"),
 ]
 
 pdf = StockPDF("P", "mm", "A4")
@@ -211,15 +234,7 @@ for _, r in inv.iterrows():
     pdf.cell(cols[4][1], ROW_H, money(r["Disc20"]), 1, 0, "R", shade)
     pdf.cell(cols[5][1], ROW_H, money(r["Disc25"]), 1, 0, "R", shade)
     pdf.cell(cols[6][1], ROW_H, money(r["Disc30"]), 1, 0, "R", shade)
-    pdf.cell(
-        cols[7][1],
-        ROW_H,
-        f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else "",
-        1,
-        0,
-        "R",
-        shade,
-    )
+    pdf.cell(cols[7][1], ROW_H, f"{r['GPpct']:.2f}%" if pd.notna(r["GPpct"]) else "", 1, 0, "R", shade)
     pdf.cell(cols[8][1], ROW_H, money(r["COGS"]), 1, 0, "R", shade)
     pdf.cell(cols[9][1], ROW_H, money(r["COGS_x1.75"]), 1, 0, "R", shade)
     pdf.cell(cols[10][1], ROW_H, money(r["1.27"]), 1, 0, "R", shade)
@@ -236,9 +251,9 @@ pdf.cell(sum(w for _, w, _ in cols[3:]), ROW_H, "", 1, 0)
 os.makedirs(OUT_DIR, exist_ok=True)
 tag = datetime.now().strftime("%y%m%d")
 existing = glob.glob(f"{OUT_DIR}/SISL_VFD_PL_{tag}_V.*.pdf")
-pattern = re.compile(r"_V\.(\d{2})\.pdf$")
-vers = [int(m.group(1)) for f in existing if (m := pattern.search(os.path.basename(f)))]
-outfile = f"SISL_VFD_PL_{tag}_V.{(max(vers) + 1 if vers else 5):02d}.pdf"
+pattern  = re.compile(r"_V\.(\d{2})\.pdf$")
+vers     = [int(m.group(1)) for f in existing if (m := pattern.search(os.path.basename(f)))]
+outfile  = f"SISL_VFD_PL_{tag}_V.{(max(vers) + 1 if vers else 5):02d}.pdf"
 
 pdf.output(os.path.join(OUT_DIR, outfile))
 print("Generated:", outfile)
